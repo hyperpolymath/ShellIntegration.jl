@@ -1,0 +1,16 @@
+// SPDX-License-Identifier: PMPL-1.0-or-later
+= ShellIntegration.jl Roadmap
+
+== v0.1.0 - The Bridge (Current)
+* [x] `run_pwsh` wrapper.
+* [x] Basic `Valence` shell stub.
+* [x] `exec_safe` command sanitizer.
+
+== v0.2.0 - Advanced Shell
+* [ ] **PowerShell Objects**: Convert JSON output from `pwsh` directly into Julia Structs/DataFrames.
+* [ ] **Valence Capabilities**: Implement the full capability logic (Network, FS, Env).
+* [ ] **REPL Mode**: A custom Julia REPL mode (press `>`) to enter ShellIntegration directly.
+
+== Future Horizons (v1.0+)
+* [ ] **Distributed Shell**: Execute commands across a cluster of verified machines.
+* [ ] **Audit Logging**: Immutable logs of every shell command executed via the library.

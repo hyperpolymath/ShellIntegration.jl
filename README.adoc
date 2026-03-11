@@ -1,0 +1,27 @@
+// SPDX-License-Identifier: PMPL-1.0-or-later
+= ShellIntegration.jl
+:toc: macro
+
+image:https://img.shields.io/badge/Project-Topology-9558B2[Topology,link="TOPOLOGY.md"]
+image:https://img.shields.io/badge/Completion-25%25-red[25%,link="TOPOLOGY.md"]
+image:https://img.shields.io/badge/License-PMPL--1.0-blue.svg[License: PMPL-1.0]
+
+*Unified Shell Interface for the Hyperpolymath Ecosystem.*
+
+ShellIntegration.jl bridges Julia with the wider operating system. It provides:
+1.  **PowerShell Bridge**: Native execution of `pwsh` scripts for cross-platform admin tasks.
+2.  **Valence Shell**: A secure, capability-based shell environment for sensitive operations.
+3.  **Safety Wrappers**: Middleware to prevent accidental destructive commands.
+
+== Quick Start
+
+[source,julia]
+----
+using ShellIntegration
+
+# Run a PowerShell command
+users = run_pwsh("Get-Process | Where-Object { \$_.CPU -gt 100 }")
+
+# Start a secure shell
+start_valence_shell()
+----
