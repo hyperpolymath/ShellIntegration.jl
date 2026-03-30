@@ -1,0 +1,27 @@
+# TEST-NEEDS: ShellIntegration.jl
+
+## Current State
+
+| Category | Count | Details |
+|----------|-------|---------|
+| **Source modules** | 1 | 270 lines |
+| **Test files** | 1 | 59 lines, 23 @test/@testset |
+| **Benchmarks** | 0 | None |
+
+## What's Missing
+
+- [ ] **E2E**: No tests with actual shell invocations
+- [ ] **Security**: Shell integration with no command injection tests
+- [ ] **Error handling**: No tests for shell unavailability, broken pipes
+
+## FLAGGED ISSUES
+- **23 tests for 270 source lines = 8.5 tests per 100 lines** -- thin for shell integration
+- **Shell integration with 0 security tests** -- command injection risk untested
+
+## Priority: P2 (MEDIUM) -- security risk
+
+## FAKE-FUZZ ALERT
+
+- `tests/fuzz/placeholder.txt` is a scorecard placeholder inherited from rsr-template-repo — it does NOT provide real fuzz testing
+- Replace with an actual fuzz harness (see rsr-template-repo/tests/fuzz/README.adoc) or remove the file
+- Priority: P2 — creates false impression of fuzz coverage
