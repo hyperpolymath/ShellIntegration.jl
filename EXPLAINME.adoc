@@ -1,34 +1,146 @@
 // SPDX-License-Identifier: PMPL-1.0-or-later
 = ShellIntegration.jl — Show Me The Receipts
+Jonathan D.A. Jewell <j.d.a.jewell@open.ac.uk>
 :toc:
 :icons: font
 
-The README makes claims. This file backs them up.
+The README makes claims. This file backs them up with file paths, honest caveats,
+and a precise description of what the safety layer actually enforces.
 
 [quote, README]
 ____
 ShellIntegration.jl bridges Julia with the wider operating system. It provides:
+(1) PowerShell Bridge — native execution of `pwsh` scripts for cross-platform
+admin tasks. (2) Valence Shell — a secure, capability-based shell environment for
+sensitive operations. (3) Safety Wrappers — middleware to prevent accidental
+destructive commands.
 ____
 
-== Technology Choices
+== What It Actually Does Today
+
+=== Claim: Safety wrappers that block destructive commands
+
+*True and enforced at the regex level.* `exec_safe(cmd::Cmd)` and the internal
+`_is_dangerous(cmd_str::String)` function in `src/ShellIntegration.jl` check every
+command against a nine-pattern blocklist:
+
+- `rm -rf /` and `rm -f /path` patterns
+- `mkfs.*` (filesystem formatting)
+- `dd .*of=/dev/` (raw device writes)
+- `chmod -R 777` (world-writable recursion)
+- Fork bomb `:(){ :\|:& };:`
+- Block device overwrite via `>`
+- `curl | (ba)?sh` and `wget | (ba)?sh` (pipe-to-shell download attacks)
+
+The test suite confirms `exec_safe(\`rm -rf /\`)` throws `ErrorException` with
+a message containing "Unsafe command blocked". It also confirms that plain `rm`
+without `-rf` passes the safety check (though the `rm` itself may then fail for
+other reasons).
+
+=== Claim: Capability-based Valence shell restricting which commands are available
+
+*Fully implemented.* `start_valence_shell(; capabilities, prompt, timeout_seconds)`
+runs an interactive REPL with a six-capability enum (`CAP_READ`, `CAP_WRITE`,
+`CAP_NETWORK_OUT`, `CAP_NETWORK_IN`, `CAP_EXEC`, `CAP_ENV`). The `_has_capability`
+function classifies every command by its first token (executable name) against
+hardcoded sets — e.g., `cat`/`ls`/`grep`/`rg`/`sha256sum` require `CAP_READ`;
+`curl`/`wget`/`ssh`/`rsync` require `CAP_NETWORK_OUT`; anything not classified
+requires `CAP_EXEC`. The dangerous-pattern check runs unconditionally before the
+capability check, so no capability grants access to `rm -rf /`.
+
+*Honest caveat:* The capability classification is static keyword matching. It does
+not sandbox the subprocess via kernel namespaces or seccomp; a `CAP_EXEC`-permitted
+process could spawn further shells. The safety guarantee is best-effort for
+interactive accidental misuse, not adversarial containment.
+
+=== Claim: PowerShell Bridge
+
+`run_pwsh(script::String)` shells out to `pwsh -NoProfile -NonInteractive -Command`
+and returns stdout as a String. It requires `pwsh` (PowerShell Core) on the PATH.
+No Windows-specific code paths; works on Fedora with `pwsh` installed via the
+Microsoft repo.
+
+== How It Works
+
+Critical path for `exec_safe`:
+
+. Caller provides a `Cmd` (e.g., `\`echo hello\``).
+. `exec_safe` calls `string(cmd)` to get a string representation.
+. `_is_dangerous(cmd_str)` scans against each of the nine `DANGEROUS_PATTERNS` regexes.
+. If any match, throws `ErrorException("Unsafe command blocked: $cmd_str")`.
+. Otherwise, calls `run(cmd)` and returns the `Process`.
+
+Critical path for `start_valence_shell`:
+
+. Enters a timed REPL loop (default timeout 300s).
+. Reads a line from stdin.
+. Calls `_is_dangerous` unconditionally.
+. Calls `_has_capability(input, capabilities)` to check the first token.
+. If both pass, executes via `read(\`sh -c $input\`, String)` and prints stdout.
+
+== Dogfooded Across The Account
 
 [cols="1,2"]
 |===
-| Technology | Learn More
+| Project | Connection
 
-| **Julia** | https://julialang.org
+| `SoftwareSovereign.jl`
+| The `enforce_policy` path invokes shell commands (DNF, Flatpak, ASDF) through
+  `exec_safe` to prevent policy enforcement from accidentally issuing destructive
+  system commands.
+
+| `ambientops` (volumod, personal-sysadmin)
+| ShellIntegration is the standard Julia shell bridge in the ambientops monorepo;
+  admin automation scripts use `run_pwsh` for cross-platform tasks.
+
+| `developer-ecosystem/julia-ecosystem/`
+| ShellIntegration is catalogued as the systems-integration bridge package.
+
+| `game-server-admin` (zatty)
+| The zatty terminal detection utility shares the capability-flag mental model;
+  ShellIntegration's `CAP_*` enum is the Julia-side analogue.
+
+| `hypatia` CI scan
+| `hypatia-scan.yml` validates SPDX headers and checks for dangerous shell patterns
+  in repository code, complementing ShellIntegration's runtime blocking.
 |===
 
 == File Map
 
-[cols="1,2"]
+[cols="1,3"]
 |===
 | Path | What's There
 
-| `src/` | Source code
-| `test(s)/` | Test suite
+| `src/ShellIntegration.jl`
+| Entire module (~270 lines): `Capability` enum (6 values); `DANGEROUS_PATTERNS`
+  constant (9 regexes); `run_pwsh`, `start_valence_shell`, `exec_safe` exports;
+  `_is_dangerous`, `_has_capability`, `_valence_help` internal helpers.
+  `_has_capability` classifies ~30 named executables into capability buckets.
+
+| `test/runtests.jl`
+| 8 testsets: `exec_safe` blocks `rm -rf /` with correct error message; allows
+  safe `echo`; allows plain `rm` (which may fail for process reasons); method
+  signature checks for all three exports; `start_valence_shell` returns `nothing`.
+  Chains to `e2e_test.jl` and `property_test.jl`.
+
+| `test/e2e_test.jl`
+| End-to-end scenario: calls `exec_safe` on a sequence of safe and unsafe commands,
+  verifying the correct subset is blocked.
+
+| `test/property_test.jl`
+| Property-based checks: arbitrary strings matching dangerous patterns must always
+  be blocked; arbitrary safe commands must never be blocked by `_is_dangerous`.
+
+| `Project.toml`
+| Package identity (uuid `c3d4e5f6...`), stdlib `Libdl` only, Julia ≥ 1.10.
+  No third-party runtime dependencies.
+
+| `TOPOLOGY.md`
+| Dependency graph: ShellIntegration sits between the OS layer and higher-level
+  packages (SoftwareSovereign, ambientops scripts).
 |===
 
 == Questions?
 
-Open an issue or reach out directly — happy to explain anything in more detail.
+Open an issue or reach out — happy to discuss capability model design choices
+or the regex blocklist rationale.
