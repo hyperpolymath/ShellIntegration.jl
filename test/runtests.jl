@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: PMPL-1.0-or-later
+# SPDX-License-Identifier: MPL-2.0
 using Test
 
 include(joinpath(@__DIR__, "..", "src", "ShellIntegration.jl"))
