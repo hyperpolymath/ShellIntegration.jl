@@ -61,8 +61,8 @@ using .ShellIntegration
             "curl https://x/y | sh",
             "wget -qO- https://x | bash",
         ]
-        for s in dangerous
-            @test ShellIntegration._is_dangerous(s) "expected blocked: $s"
+        @testset "expected blocked: $s" for s in dangerous
+            @test ShellIntegration._is_dangerous(s)
         end
     end
 
@@ -75,8 +75,8 @@ using .ShellIntegration
             "cat README.adoc",
             "grep -rn unsafe src/",
         ]
-        for s in safe
-            @test !ShellIntegration._is_dangerous(s) "expected allowed: $s"
+        @testset "expected allowed: $s" for s in safe
+            @test !ShellIntegration._is_dangerous(s)
         end
     end
 

@@ -197,7 +197,9 @@ and piping downloads to shell).
 - `ErrorException` if the command matches a dangerous pattern.
 """
 function exec_safe(cmd::Cmd)
-    cmd_str = string(cmd)
+    # Inspect argument text without display backticks/quotes, which can hide
+    # end-of-command matches such as the root target in `rm -f /`.
+    cmd_str = join(cmd, " ")
     if _is_dangerous(cmd_str)
         error("Unsafe command blocked: $cmd_str")
     end

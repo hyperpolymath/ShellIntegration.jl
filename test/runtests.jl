@@ -6,6 +6,7 @@ using Test
 # must NOT re-include the source file.
 include(joinpath(@__DIR__, "..", "src", "ShellIntegration.jl"))
 using .ShellIntegration
+using .ShellIntegration: CAP_READ, CAP_EXEC
 
 @testset "ShellIntegration.jl" begin
 
@@ -18,9 +19,9 @@ using .ShellIntegration
         @test_throws ErrorException exec_safe(`rm -Rf /usr`)
         @test_throws ErrorException exec_safe(`rm --recursive /etc`)
         @test_throws ErrorException exec_safe(`rm -f /`)
-        # pipe-to-shell blocked
-        @test_throws ErrorException exec_safe(`curl https://example.com/x.sh | sh`)
-        @test_throws ErrorException exec_safe(`wget -qO- https://x | bash`)
+        # Pipelines must be quoted shell scripts in Julia command literals.
+        @test_throws ErrorException exec_safe(`sh -c 'curl https://example.com/x.sh | sh'`)
+        @test_throws ErrorException exec_safe(`sh -c 'wget -qO- https://x | bash'`)
         # fork bomb blocked
         @test_throws ErrorException exec_safe(`bash -c ':(){ :|:& };:'`)
         # Verify the error message is informative
@@ -43,9 +44,12 @@ using .ShellIntegration
         # Plain rm (no flags, non-root path) should not be blocked by the filter.
         # We use a nonexistent file so rm fails, but the safety check passes
         # (throws ProcessFailedException, not ErrorException).
-        @test_throws ProcessFailedException exec_safe(`rm /tmp/nonexistent_file_shellintegration_test_99`)
-        # rm -f on a single non-root file is also allowed by the filter
-        @test_throws ProcessFailedException exec_safe(`rm -f /tmp/nonexistent_file_shellintegration_f_99`)
+        mktempdir() do dir
+            missing_file = joinpath(dir, "nonexistent")
+            @test_throws ProcessFailedException exec_safe(`rm $missing_file`)
+            # rm -f permits a missing non-root file and exits successfully.
+            @test success(exec_safe(`rm -f $missing_file`))
+        end
     end
 
     @testset "run_pwsh function exists" begin
