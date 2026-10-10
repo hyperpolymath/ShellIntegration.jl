@@ -20,7 +20,11 @@ end
 
 SUITE["api"] = BenchmarkGroup()
 
-SUITE["api"]["start_valence_shell"] = @benchmarkable start_valence_shell()
+# Non-interactive path (the default when stdin is not a TTY). Must not
+# enter the REPL or hang the benchmark runner.
+SUITE["api"]["start_valence_shell_noninteractive"] = @benchmarkable start_valence_shell()
+
+SUITE["api"]["start_valence_shell_input_mode"] = @benchmarkable start_valence_shell(; input="ls /")
 
 SUITE["api"]["method_lookup"] = @benchmarkable begin
     hasmethod(exec_safe, Tuple{Cmd})
