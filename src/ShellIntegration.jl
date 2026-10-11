@@ -23,17 +23,31 @@ end
 Shell command patterns that are unconditionally blocked regardless of
 capabilities. These patterns represent destructive or privilege-escalation
 commands that should never be executed from an automated shell.
+
+Patterns are written to avoid over-blocking: a plain `rm /tmp/...` (no
+flags) or `rm -f /tmp/...` (force on a single non-root file) is permitted;
+recursive removes (`rm -r`, `rm -rf`, `rm -Rf` …) and any remove that
+targets the filesystem root are blocked.
 """
-const DANGEROUS_PATTERNS = [
-    r"rm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+)?/",        # rm -rf / or rm -f /path
-    r"rm\s+-rf\s",                                  # rm -rf anything
-    r"mkfs\.",                                       # format filesystems
-    r"dd\s+.*of=/dev/",                             # raw device writes
-    r"chmod\s+-R\s+777",                             # world-writable recursion
-    r":(){ :\|:& };:",                              # fork bomb
-    r">\s*/dev/sd[a-z]",                            # overwrite block devices
-    r"curl.*\|\s*(ba)?sh",                          # pipe curl to shell
-    r"wget.*\|\s*(ba)?sh",                          # pipe wget to shell
+const DANGEROUS_PATTERNS = Regex[
+    # --- rm: recursive in any form ---
+    # Short -r / -R / --recursive followed by whitespace (may combine with -f etc.)
+    r"\brm\s+(?:-[a-zA-Z]*[rR][a-zA-Z]*\s+|--recursive[\s=])",
+    # Combined short flags containing both r and f (any order, e.g. -rf, -fr, -Rf, -rvf, -Rfv …)
+    r"\brm\s+-[a-zA-Z]*[rR][a-zA-Z]*[fF][a-zA-Z]*\s",
+    r"\brm\s+-[a-zA-Z]*[fF][a-zA-Z]*[rR][a-zA-Z]*\s",
+    # Two separate short-flag groups (e.g. `rm -r -f`, `rm -f -R`, `rm -R --force`)
+    r"\brm\s+(?:-[a-zA-Z]+|--(?:recursive|force))\s+(?:-[a-zA-Z]+|--(?:recursive|force))\s",
+    # --- rm: targeting the filesystem root specifically, with or without -f ---
+    r"\brm\s+(?:-[a-zA-ZfFrRv]+\s+)?/\s*(?:$|[;&|>)])",
+    # --- other destructive / escalation patterns ---
+    r"\bmkfs\.",                                         # format filesystems
+    r"\bdd\s+[^|;&>]*of=/dev/",                          # raw device writes
+    r"\bchmod\s+(?:-[a-zA-Z]*R[a-zA-Z]*\b|--recursive\b)[^|;&>]*\b777\b",  # world-writable recursion (catches -R, -Rf, -fR, --recursive …)
+    r":\(\)\s*\{\s*:\|\s*:\s*&\s*\}\s*;:",               # fork bomb
+    r">\s*/dev/sd[a-z]",                                 # overwrite block devices
+    r"\bcurl\b[^|;&>]*\|\s*(?:sudo\s+)?(?:ba)?sh\b",     # pipe curl to shell
+    r"\bwget\b[^|;&>]*\|\s*(?:sudo\s+)?(?:ba)?sh\b",     # pipe wget to shell
 ]
 
 """
@@ -59,18 +73,27 @@ end
 """
     start_valence_shell(; capabilities::Vector{Capability} = [CAP_READ, CAP_NETWORK_OUT],
                           prompt::String = "valence> ",
-                          timeout_seconds::Int = 300)
+                          timeout_seconds::Int = 300,
+                          input::Union{AbstractString,Nothing} = nothing,
+                          noninteractive::Bool = false)
 
 Start an interactive capability-restricted shell session. Commands are
 validated against the granted capability set before execution.
 
 The shell runs in a read-eval-print loop until the user types `exit`,
-`quit`, or the timeout expires.
+`quit`, stdin reaches EOF, or the timeout expires.
 
 # Arguments
 - `capabilities`: set of granted capabilities (default: read + outbound network)
 - `prompt`: the shell prompt string
 - `timeout_seconds`: maximum session duration in seconds (default: 300)
+- `input`: if provided, run this one command (string) and return its output
+  as a `String` instead of entering the interactive REPL. Useful for tests
+  and programmatic use.
+- `noninteractive`: if `true` (or stdin is not a TTY, or `input` is
+  supplied), skip the REPL entirely and return `nothing` immediately when
+  there is nothing to execute. This makes the function safe to call from
+  automated tests and CI where no TTY is attached.
 
 # Capabilities
 - `CAP_READ`: allows `cat`, `ls`, `head`, `tail`, `find`, `grep`
@@ -79,10 +102,28 @@ The shell runs in a read-eval-print loop until the user types `exit`,
 - `CAP_NETWORK_IN`: allows `nc -l`, `python -m http.server`
 - `CAP_EXEC`: allows running arbitrary executables
 - `CAP_ENV`: allows `env`, `printenv`, `export`
+
+# Returns
+- When running interactively: `nothing` (the REPL prints to stdout itself).
+- When `input` is supplied: the captured stdout of the command as a `String`.
 """
 function start_valence_shell(; capabilities::Vector{Capability} = [CAP_READ, CAP_NETWORK_OUT],
                                prompt::String = "valence> ",
-                               timeout_seconds::Int = 300)
+                               timeout_seconds::Int = 300,
+                               input::Union{AbstractString,Nothing} = nothing,
+                               noninteractive::Bool = false)
+    # --- non-interactive fast paths ---
+    # 1. Explicit single-command mode (used by tests and programmatic callers).
+    if input !== nothing
+        return _valence_execute_line(String(input), capabilities)
+    end
+    # 2. Auto-detect: no TTY and caller didn't pass input -> no-op return.
+    #    This is the safety rail that prevents CI from spinning forever
+    #    reading from a closed stdin.
+    if noninteractive || !(_stdin_is_interactive())
+        return nothing
+    end
+
     cap_names = join(string.(capabilities), ", ")
     println("Valence Shell Active")
     println("  Capabilities: [$cap_names]")
@@ -109,49 +150,40 @@ function start_valence_shell(; capabilities::Vector{Capability} = [CAP_READ, CAP
             if e isa InterruptException
                 println("\nInterrupted.")
                 break
+            elseif e isa EOFError
+                println("\nEnd of input.")
+                break
             end
             rethrow(e)
         end
 
-        input = strip(line)
-        isempty(input) && continue
+        # readline returns "" at EOF without throwing on some streams
+        if !isopen(stdin) || (isempty(line) && eof(stdin))
+            println("\nEnd of input.")
+            break
+        end
+
+        cmd = strip(line)
+        isempty(cmd) && continue
 
         # Built-in commands
-        if input in ("exit", "quit")
+        if cmd in ("exit", "quit")
             println("Valence Shell closed.")
             break
-        elseif input == "help"
+        elseif cmd == "help"
             _valence_help(capabilities)
             continue
-        elseif input == "caps"
+        elseif cmd == "caps"
             println("Active capabilities: [$cap_names]")
             continue
-        elseif input == "elapsed"
+        elseif cmd == "elapsed"
             println("Session time: $(round(elapsed; digits=1))s / $(timeout_seconds)s")
             continue
         end
 
-        # Safety check: block dangerous patterns unconditionally
-        if _is_dangerous(input)
-            println("BLOCKED: Command matches a dangerous pattern.")
-            continue
-        end
-
-        # Capability check
-        if !_has_capability(input, capabilities)
-            println("DENIED: Insufficient capabilities for this command.")
-            println("  Granted: [$cap_names]")
-            continue
-        end
-
-        # Execute
-        try
-            result = read(`sh -c $input`, String)
-            isempty(result) || print(result)
-        catch e
-            println("Error: $(sprint(showerror, e))")
-        end
+        _valence_handle_command(cmd, capabilities)
     end
+    return nothing
 end
 
 """
@@ -165,7 +197,9 @@ and piping downloads to shell).
 - `ErrorException` if the command matches a dangerous pattern.
 """
 function exec_safe(cmd::Cmd)
-    cmd_str = string(cmd)
+    # Inspect argument text without display backticks/quotes, which can hide
+    # end-of-command matches such as the root target in `rm -f /`.
+    cmd_str = join(cmd, " ")
     if _is_dangerous(cmd_str)
         error("Unsafe command blocked: $cmd_str")
     end
@@ -175,6 +209,21 @@ end
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+"""Check whether stdin looks like an interactive TTY. Returns false in CI
+and other non-interactive contexts (e.g., when a test calls us without
+mocking stdin, or when a parent process piped in nothing)."""
+function _stdin_is_interactive()
+    # `isinteractive()` is Julia's global flag, true on a REPL/-i; false
+    # under `julia -e`, `julia script.jl`, and `Pkg.test()` (which runs via
+    # `-e`). We additionally require stdin to be an actual TTY handle so
+    # that piped input (`echo | julia`) still works as a batch.
+    try
+        return isinteractive() && stdin isa Base.TTY
+    catch
+        return false
+    end
+end
 
 """Check whether a command string matches any dangerous pattern."""
 function _is_dangerous(cmd_str::String)
@@ -234,6 +283,43 @@ function _has_capability(input::String, caps::Vector{Capability})
 
     # General execution: anything not classified above requires CAP_EXEC
     return CAP_EXEC in caps
+end
+
+"""Execute a single line from the Valence shell: safety-check, capability-
+check, then run via `sh -c`. Returns the captured stdout as a String
+(used by the `input=` path); the interactive path uses
+`_valence_handle_command` which prints to stdout."""
+function _valence_execute_line(cmd::String, caps::Vector{Capability})::String
+    # Safety check: block dangerous patterns unconditionally
+    if _is_dangerous(cmd)
+        error("BLOCKED: Command matches a dangerous pattern: $cmd")
+    end
+    # Capability check
+    if !_has_capability(cmd, caps)
+        error("DENIED: Insufficient capabilities for command: $cmd")
+    end
+    return read(`sh -c $cmd`, String)
+end
+
+"""Interactive-mode helper: run the safety/capability checks and execute,
+printing results or errors to stdout (no thrown exceptions to the REPL)."""
+function _valence_handle_command(cmd::String, caps::Vector{Capability})
+    if _is_dangerous(cmd)
+        println("BLOCKED: Command matches a dangerous pattern.")
+        return
+    end
+    if !_has_capability(cmd, caps)
+        cap_names = join(string.(caps), ", ")
+        println("DENIED: Insufficient capabilities for this command.")
+        println("  Granted: [$cap_names]")
+        return
+    end
+    try
+        result = read(`sh -c $cmd`, String)
+        isempty(result) || print(result)
+    catch e
+        println("Error: $(sprint(showerror, e))")
+    end
 end
 
 """Print help text for the Valence shell."""
